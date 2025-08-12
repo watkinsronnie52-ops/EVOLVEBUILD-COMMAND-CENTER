@@ -632,3 +632,637 @@ const App = () => {
 };
 
 export default App;
+'use client';
+
+import { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { getFirestore, collection, onSnapshot, doc, setDoc, serverTimestamp, updateDoc, deleteDoc, query } from 'firebase/firestore';
+
+// Modal component for editing tasks
+const EditModal = ({ task, onSave, onClose }) => {
+  const [editedResponse, setEditedResponse] = useState(task.response);
+
+  const handleSave = () => {
+    onSave(task.id, editedResponse);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
+      <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700 w-full max-w-2xl">
+        <h3 className="text-xl font-bold text-yellow-300 mb-4">Edit Saved Task</h3>
+        <p className="text-xs text-gray-400 mb-2">Prompt: {task.prompt}</p>
+        <textarea
+          className="w-full h-48 bg-gray-700 text-gray-200 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-500 transition-colors"
+          value={editedResponse}
+          onChange={(e) => setEditedResponse(e.target.value)}
+        />
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-lg transition-all duration-300"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            className="bg-yellow-600 hover:bg-yellow-700 text-white font-bold py-2 px-4 rounded-lg transition-all duration-300"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Main application component for our Command Center.
+const App = () => {
+  // State for user input and AI responses.
+  const [strategyInput, setStrategyInput] = useState('');
+  const [strategyResponse, setStrategyResponse] = useState('');
+  const [opsInput, setOpsInput] = useState('');
+  const [opsResponse, setOpsResponse] = useState('');
+  const [communityInput, setCommunityInput] = useState('');
+  const [communityResponse, setCommunityResponse] = useState('');
+  const [financialInput, setFinancialInput] = useState('');
+  const [financialResponse, setFinancialResponse] = useState('');
+  const [marketingInput, setMarketingInput] = useState('');
+  const [marketingResponse, setMarketingResponse] = useState('');
+  const [legalInput, setLegalInput] = useState('');
+  const [legalResponse, setLegalResponse] = useState('');
+  const [hrInput, setHrInput] = useState('');
+  const [hrResponse, setHrResponse] = useState('');
+  const [pitchDeckResponse, setPitchDeckResponse] = useState('');
+
+
+  // State for loading indicators and database connection status.
+  const [isLoading, setIsLoading] = useState(false);
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+
+  // State for the edit modal
+  const [editingTask, setEditingTask] = useState(null);
+
+  // State to store the tasks fetched from Firestore.
+  const [tasks, setTasks] = useState([]);
+
+  // State for the knowledge base search.
+  const [searchTerm, setSearchTerm] = useState('');
+
+  // Filtered tasks for the knowledge base.
+  const filteredTasks = tasks.filter(task => 
+    task.prompt?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    task.response?.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  // --- Firebase Initialization and Authentication ---
+  useEffect(() => {
+    const initializeFirebase = async () => {
+      try {
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        if (!firebaseConfig) {
+          console.error("Firebase config is not available.");
+          return;
+        }
+
+        const app = initializeApp(firebaseConfig);
+        const firestore = getFirestore(app);
+        const authService = getAuth(app);
+        
+        setDb(firestore);
+        setAuth(authService);
+
+        onAuthStateChanged(authService, async (user) => {
+          if (user) {
+            setUserId(user.uid);
+          } else {
+            try {
+              if (initialAuthToken) {
+                await signInWithCustomToken(authService, initialAuthToken);
+                setUserId(authService.currentUser.uid);
+              } else {
+                await signInAnonymously(authService);
+                setUserId(authService.currentUser.uid);
+              }
+            } catch (error) {
+              console.error("Failed to sign in:", error);
+            }
+          }
+        });
+      } catch (error) {
+        console.error("Error initializing Firebase:", error);
+      }
+    };
+    initializeFirebase();
+  }, []);
+
+  // --- Firestore Data Fetching with Real-time Listener ---
+  useEffect(() => {
+    if (!db || !userId) return;
+
+    const tasksCollectionPath = `/artifacts/evolvebuild-app-nextjs/users/${userId}/tasks`;
+    const q = query(collection(db, tasksCollectionPath));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetchedTasks = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      fetchedTasks.sort((a, b) => b.timestamp?.toMillis() - a.timestamp?.toMillis());
+      setTasks(fetchedTasks);
+    }, (error) => {
+      console.error("Error fetching tasks:", error);
+    });
+
+    return () => unsubscribe();
+  }, [db, userId]);
+
+  // Function to make a fetch call to the Gemini API.
+  const getGeminiResponse = async (prompt) => {
+    setIsLoading(true);
+    let retries = 0;
+    const maxRetries = 5;
+    const retryDelay = 1000;
+
+    while (retries < maxRetries) {
+      try {
+        const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+        const payload = { contents: chatHistory };
+        const apiKey = "";
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          throw new Error(`API error: ${response.status} ${response.statusText}`);
+        }
+
+        const result = await response.json();
+        if (result.candidates && result.candidates.length > 0 &&
+            result.candidates[0].content && result.candidates[0].content.parts &&
+            result.candidates[0].content.parts.length > 0) {
+          const text = result.candidates[0].content.parts[0].text;
+          setIsLoading(false);
+          return text;
+        } else {
+          setIsLoading(false);
+          return "I couldn't generate a response. Please try again.";
+        }
+      } catch (error) {
+        console.error('API call failed:', error);
+        retries++;
+        await new Promise(resolve => setTimeout(resolve, retryDelay * Math.pow(2, retries)));
+      }
+    }
+    setIsLoading(false);
+    return "Failed to get a response after multiple retries. Please check the network or try again later.";
+  };
+
+  /**
+   * Saves a new task to Firestore.
+   */
+  const saveTaskToFirestore = async (category, prompt, response) => {
+    if (!db || !userId) {
+      console.error("Database or user ID not available.");
+      return;
+    }
+    
+    try {
+      const tasksCollectionRef = collection(db, `/artifacts/evolvebuild-app-nextjs/users/${userId}/tasks`);
+      await setDoc(doc(tasksCollectionRef), {
+        category,
+        prompt,
+        response,
+        timestamp: serverTimestamp()
+      });
+    } catch (e) {
+      console.error("Error adding document: ", e);
+    }
+  };
+
+  /**
+   * Updates a task in Firestore.
+   */
+  const updateTaskInFirestore = async (taskId, newResponse) => {
+    if (!db || !userId) {
+      console.error("Database or user ID not available.");
+      return;
+    }
+    try {
+      const taskDocRef = doc(db, `/artifacts/evolvebuild-app-nextjs/users/${userId}/tasks`, taskId);
+      await updateDoc(taskDocRef, {
+        response: newResponse,
+        timestamp: serverTimestamp()
+      });
+    } catch (e) {
+      console.error("Error updating document: ", e);
+    }
+  };
+
+  /**
+   * Deletes a task from Firestore.
+   */
+  const deleteTaskFromFirestore = async (taskId) => {
+    if (!db || !userId) {
+      console.error("Database or user ID not available.");
+      return;
+    }
+    try {
+      const taskDocRef = doc(db, `/artifacts/evolvebuild-app-nextjs/users/${userId}/tasks`, taskId);
+      await deleteDoc(taskDocRef);
+    } catch (e) {
+      console.error("Error deleting document: ", e);
+    }
+  };
+
+  /**
+   * Generic handler for submitting tasks.
+   * It gets the AI response and then saves it to the database.
+   */
+  const handleTaskSubmit = async (e, type, prompt, setResponse) => {
+    e.preventDefault();
+    if (!prompt.trim()) return;
+
+    setResponse('Our AI team is working on your request...');
+    const aiResponse = await getGeminiResponse(prompt);
+    setResponse(aiResponse);
+    
+    saveTaskToFirestore(type, prompt, aiResponse);
+  };
+
+  /**
+   * Generates a pitch deck from saved tasks.
+   */
+  const handlePitchDeckGeneration = async () => {
+    // Collect relevant data from all saved tasks.
+    const strategyTasks = tasks.filter(t => t.category === 'strategy').map(t => t.response).join('\n---\n');
+    const financialTasks = tasks.filter(t => t.category === 'financials').map(t => t.response).join('\n---\n');
+    const marketingTasks = tasks.filter(t => t.category === 'marketing').map(t => t.response).join('\n---\n');
+    const opsTasks = tasks.filter(t => t.category === 'operations').map(t => t.response).join('\n---\n');
+    const communityTasks = tasks.filter(t => t.category === 'community').map(t => t.response).join('\n---\n');
+    const legalTasks = tasks.filter(t => t.category === 'legal').map(t => t.response).join('\n---\n');
+    const hrTasks = tasks.filter(t => t.category === 'hr').map(t => t.response).join('\n---\n');
+
+    const combinedPrompts = `
+      Based on the following business data, generate a comprehensive pitch deck outline for EvolveBuild Innovations Inc. The deck should be for a hyper-aggressive, AI-first construction company seeking venture capital. Include all standard pitch deck sections (Problem, Solution, Market, Business Model, Competition, Team, Financials, and Ask). Use markdown for clear formatting and bolding.
+
+      --- Saved Strategies:
+      ${strategyTasks}
+      --- Saved Financials:
+      ${financialTasks}
+      --- Saved Marketing:
+      ${marketingTasks}
+      --- Saved Operations:
+      ${opsTasks}
+      --- Saved Community Impact:
+      ${communityTasks}
+      --- Saved Legal:
+      ${legalTasks}
+      --- Saved HR:
+      ${hrTasks}
+    `;
+
+    setPitchDeckResponse('Generating a comprehensive pitch deck from all of our saved knowledge...');
+    const response = await getGeminiResponse(combinedPrompts);
+    setPitchDeckResponse(response);
+    saveTaskToFirestore('pitch_deck', 'Generate pitch deck from saved tasks.', response);
+  };
+
+  // --- UI Event Handlers (triggering the generic submit handler) ---
+  const handleStrategySubmit = (e) => {
+    const prompt = `As a hyper-aggressive construction business, EvolveBuild Innovations Inc., which includes Watkins Home Improvement and Watkins Home Inspections, provide a detailed strategic plan to achieve the following goal: "${strategyInput}". The plan should be concise, actionable, and focus on market disruption through technology.`;
+    handleTaskSubmit(e, 'strategy', prompt, setStrategyResponse);
+  };
+  
+  const handleOpsSubmit = (e) => {
+    const prompt = `As the AI Operations lead for EvolveBuild Innovations Inc., provide a list of key milestones, potential logistical challenges, and solutions for a construction project described as: "${opsInput}". Focus on efficiency and a tech-first approach.`;
+    handleTaskSubmit(e, 'operations', prompt, setOpsResponse);
+  };
+
+  const handleCommunitySubmit = (e) => {
+    const prompt = `As the AI Community Impact lead for EvolveBuild Innovations Inc., create a detailed curriculum outline and a list of necessary resources for a community initiative described as: "${communityInput}". The initiative should focus on improving the local workforce and demonstrating our company's commitment to social good.`;
+    handleTaskSubmit(e, 'community', prompt, setCommunityResponse);
+  };
+
+  const handleFinancialsSubmit = (e) => {
+    const prompt = `As the AI Financial Analyst for EvolveBuild Innovations Inc., provide a detailed financial projection and key metrics for the following goal: "${financialInput}". The projection should be based on a hyper-aggressive growth model, including revenue streams from construction, home improvement, and inspections.`;
+    handleTaskSubmit(e, 'financials', prompt, setFinancialResponse);
+  };
+
+  const handleMarketingSubmit = (e) => {
+    const prompt = `As the AI Marketing and Sales specialist for EvolveBuild Innovations Inc., draft a compelling marketing campaign for the following goal: "${marketingInput}". The campaign should include social media post ideas and an email template. Focus on our hyper-aggressive, tech-first approach and our commitment to community impact.`;
+    handleTaskSubmit(e, 'marketing', prompt, setMarketingResponse);
+  };
+
+  const handleLegalSubmit = (e) => {
+    const prompt = `As the AI Legal & Compliance advisor for EvolveBuild Innovations Inc., provide a draft for a legal document or advice on a compliance matter related to the following request: "${legalInput}". Focus on clarity, legal accuracy (using markdown for legal sections), and practicality for a growing C Corp.`;
+    handleTaskSubmit(e, 'legal', prompt, setLegalResponse);
+  };
+
+  const handleHrSubmit = (e) => {
+    const prompt = `As the AI HR & Recruiting specialist for EvolveBuild Innovations Inc., draft a job description and a list of key interview questions for the following role: "${hrInput}". The description should reflect our hyper-aggressive, tech-first culture and commitment to workforce development.`;
+    handleTaskSubmit(e, 'hr', prompt, setHrResponse);
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white p-4 font-sans flex flex-col items-center">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+      `}</style>
+      <div className="w-full max-w-4xl">
+        <header className="text-center my-8">
+          <h1 className="text-4xl sm:text-5xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-green-400">
+            EvolveBuild Innovations Inc.
+          </h1>
+          <p className="mt-2 text-lg text-gray-400">AI Command Center</p>
+          <p className="text-sm text-gray-500">Visionary: You, AI Partner: Gemini</p>
+          {userId && (
+            <p className="mt-2 text-xs text-gray-600 break-all">User ID: {userId}</p>
+          )}
+        </header>
+
+        <main className="space-y-8">
+          {(isLoading || editingTask) && (
+            <div className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
+              {isLoading && <div className="text-white text-xl animate-pulse">Our AI Team is collaborating...</div>}
+            </div>
+          )}
+          
+          {editingTask && (
+            <EditModal
+              task={editingTask}
+              onSave={updateTaskInFirestore}
+              onClose={() => setEditingTask(null)}
+            />
+          )}
+
+          {/* Input and Response Sections */}
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-blue-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path><path d="M10 13l-4 4 4 4"></path><path d="M14 17l4 4-4 4"></path></svg>
+              Strategy & Vision
+            </h2>
+            <form onSubmit={handleStrategySubmit} className="flex flex-col sm:flex-row gap-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                placeholder="Submit a strategic task for the AI team..."
+                value={strategyInput}
+                onChange={(e) => setStrategyInput(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Execute ✨
+              </button>
+            </form>
+            {strategyResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                {strategyResponse}
+              </div>
+            )}
+          </div>
+          
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-green-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="3" y1="15" x2="21" y2="15"></line><line x1="9" y1="3" x2="9" y2="21"></line><line x1="15" y1="3" x2="15" y2="21"></line></svg>
+              Operations & Logistics
+            </h2>
+            <form onSubmit={handleOpsSubmit} className="flex flex-col sm:flex-row gap-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-green-500 transition-colors"
+                placeholder="Request an operational plan from the AI team..."
+                value={opsInput}
+                onChange={(e) => setOpsInput(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Execute ✨
+              </button>
+            </form>
+            {opsResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                {opsResponse}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-purple-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><path d="M17 19.25H7A4.25 4.25 0 0 1 2.75 15V9.75A4.25 4.25 0 0 1 7 5.5h10a4.25 4.25 0 0 1 4.25 4.25V15A4.25 4.25 0 0 1 17 19.25Z"></path><path d="M12 5.5v-2c0-1.1.9-2 2-2h1.5a2 2 0 0 1 2 2v2"></path><path d="M12 5.5v2c0 1.1-.9 2-2 2H8.5a2 2 0 0 1-2-2v-2"></path><path d="M15 19.25v2c0 1.1-.9 2-2 2H9.5a2 2 0 0 1-2-2v-2"></path></svg>
+              Community Impact & Workforce
+            </h2>
+            <form onSubmit={handleCommunitySubmit} className="flex flex-col sm:flex-row gap-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500 transition-colors"
+                placeholder="Propose a community initiative to the AI team..."
+                value={communityInput}
+                onChange={(e) => setCommunityInput(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Execute ✨
+              </button>
+            </form>
+            {communityResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                {communityResponse}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-red-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><path d="M12 12v.01"></path><path d="M12 7V4"></path><path d="M12 17v3"></path><path d="M12 21a9 9 0 0 0 9-9h-3a6 6 0 0 1-6 6v3z"></path><path d="M12 3a9 9 0 0 0-9 9h3a6 6 0 0 1 6-6V3z"></path></svg>
+              Financial Projections
+            </h2>
+            <form onSubmit={handleFinancialsSubmit} className="flex flex-col sm:flex-row gap-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-red-500 transition-colors"
+                placeholder="Submit a financial goal for the AI team..."
+                value={financialInput}
+                onChange={(e) => setFinancialInput(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Execute ✨
+              </button>
+            </form>
+            {financialResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                {financialResponse}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-pink-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><path d="M15 13l-3 3-3-3"></path><path d="M12 17V3"></path><path d="M19 12a7 7 0 1 1-7-7"></path></svg>
+              Marketing & Sales
+            </h2>
+            <form onSubmit={handleMarketingSubmit} className="flex flex-col sm:flex-row gap-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-pink-500 transition-colors"
+                placeholder="Submit a marketing goal for the AI team..."
+                value={marketingInput}
+                onChange={(e) => setMarketingInput(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="bg-pink-600 hover:bg-pink-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Execute ✨
+              </button>
+            </form>
+            {marketingResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                {marketingResponse}
+              </div>
+            )}
+          </div>
+          
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-orange-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><path d="M21 14.5a2.5 2.5 0 0 1-5 0v-5a2.5 2.5 0 0 1 5 0v5z"></path><path d="M19 12h-5"></path><path d="M12 22h-1a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h1"></path><path d="M12 15h-2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2"></path><path d="M12 9h-2a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h2"></path></svg>
+              Legal & Compliance
+            </h2>
+            <form onSubmit={handleLegalSubmit} className="flex flex-col sm:flex-row gap-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-orange-500 transition-colors"
+                placeholder="Draft an NDA or get compliance advice..."
+                value={legalInput}
+                onChange={(e) => setLegalInput(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Execute ✨
+              </button>
+            </form>
+            {legalResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                {legalResponse}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-teal-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87m-4-1.13a4 4 0 0 0-3-4.13"></path><path d="M16 3a4 4 0 0 1 0 8"></path></svg>
+              HR & Recruiting
+            </h2>
+            <form onSubmit={handleHrSubmit} className="flex flex-col sm:flex-row gap-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-500 transition-colors"
+                placeholder="Draft a job description or interview questions..."
+                value={hrInput}
+                onChange={(e) => setHrInput(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Execute ✨
+              </button>
+            </form>
+            {hrResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                {hrResponse}
+              </div>
+            )}
+          </div>
+
+
+          {/* Saved Tasks / Knowledge Base Section */}
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700">
+            <h2 className="text-2xl font-bold mb-4 flex items-center text-yellow-300">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mr-2"><path d="M12 18V6"></path><path d="M15 15l-3 3-3-3"></path><path d="M17 12V3"></path><path d="M19 9l-2-2-2 2"></path><path d="M7 12v9"></path><path d="M5 15l2 2 2-2"></path></svg>
+              Knowledge Base
+            </h2>
+            <div className="flex flex-col sm:flex-row gap-4 mb-4">
+              <input
+                type="text"
+                className="flex-grow bg-gray-700 p-3 rounded-lg border border-gray-600 focus:outline-none focus:ring-2 focus:ring-yellow-500 transition-colors"
+                placeholder="Search all saved tasks..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+              <button
+                onClick={handlePitchDeckGeneration}
+                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-lg transition-all duration-300 transform hover:scale-105 shadow-md"
+              >
+                Generate Pitch Deck 🚀
+              </button>
+            </div>
+            
+            {pitchDeckResponse && (
+              <div className="mt-4 p-4 bg-gray-700 rounded-lg text-sm text-gray-300 whitespace-pre-wrap">
+                <strong className="text-yellow-200">Generated Pitch Deck:</strong>
+                {pitchDeckResponse}
+              </div>
+            )}
+
+            <div className="space-y-4">
+              {filteredTasks.length > 0 ? (
+                filteredTasks.map(task => (
+                  <div key={task.id} className="bg-gray-700 p-4 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between">
+                    <div className="flex-grow">
+                      <p className="text-sm font-bold text-gray-300 mb-1">
+                        {(task.timestamp && new Date(task.timestamp.toDate()).toLocaleString()) || 'Just now'} | Category: {task.category}
+                      </p>
+                      <p className="text-xs text-gray-400">Prompt: {task.prompt}</p>
+                      <div className="mt-2 text-sm text-gray-200 whitespace-pre-wrap">
+                        <strong className="text-yellow-200">Response:</strong> {task.response}
+                      </div>
+                    </div>
+                    <div className="flex-shrink-0 mt-4 sm:mt-0 sm:ml-4 flex gap-2">
+                      <button
+                        onClick={() => setEditingTask(task)}
+                        className="bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold py-2 px-4 rounded-lg transition-all duration-300"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => deleteTaskFromFirestore(task.id)}
+                        className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-2 px-4 rounded-lg transition-all duration-300"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-gray-400">No tasks match your search. Start executing above to populate your knowledge base!</p>
+              )}
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+};
+
+export default App;
